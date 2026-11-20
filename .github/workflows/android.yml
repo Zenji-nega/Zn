@@ -1,0 +1,30 @@
+name: Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-apk
+        run: cargo install cargo-apk --locked
+      - name: Build debug-signed APK
+        # GitHub's Ubuntu runners ship the Android SDK and NDK.
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: cargo apk build --lib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zn-apk
+          path: target/debug/apk/*.apk
