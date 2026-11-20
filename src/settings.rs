@@ -1,12 +1,31 @@
 //! User settings, stored as JSON next to the projects.
 //!
-//! Secrets (API keys, GitHub tokens) are deliberately not stored here yet.
+//! API keys are *not* here; see `secrets.rs`.
 
 use std::{fs, io, path::Path};
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm::{Anthropic, OpenAiCompat};
+
 const FILE_NAME: &str = "settings.json";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProviderKind {
+    Anthropic,
+    OpenAiCompatible,
+}
+
+impl ProviderKind {
+    pub const ALL: [Self; 2] = [Self::Anthropic, Self::OpenAiCompatible];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Anthropic => "Anthropic (Claude)",
+            Self::OpenAiCompatible => "OpenAI-compatible",
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -15,6 +34,13 @@ pub struct Settings {
     /// UI zoom factor, clamped to `MIN_SCALE..=MAX_SCALE`.
     pub font_scale: f32,
     pub github_user: String,
+
+    pub provider: ProviderKind,
+    pub anthropic_model: String,
+    pub openai_base_url: String,
+    pub openai_model: String,
+    /// Lets the agent run shell commands in the project. Off by default.
+    pub allow_commands: bool,
 }
 
 impl Settings {
@@ -44,6 +70,11 @@ impl Default for Settings {
             dark_mode: true,
             font_scale: 1.2,
             github_user: String::new(),
+            provider: ProviderKind::Anthropic,
+            anthropic_model: Anthropic::DEFAULT_MODEL.to_owned(),
+            openai_base_url: OpenAiCompat::DEFAULT_BASE_URL.to_owned(),
+            openai_model: String::new(),
+            allow_commands: false,
         }
     }
 }
@@ -59,6 +90,10 @@ mod tests {
             dark_mode: false,
             font_scale: 1.5,
             github_user: "zenji".into(),
+            provider: ProviderKind::OpenAiCompatible,
+            openai_model: "some-model".into(),
+            allow_commands: true,
+            ..Settings::default()
         };
         settings.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), settings);
@@ -79,5 +114,12 @@ mod tests {
         let loaded = Settings::load(dir.path());
         assert_eq!(loaded.font_scale, Settings::MAX_SCALE);
         assert!(loaded.dark_mode);
+        assert!(!loaded.allow_commands);
+        assert_eq!(loaded.provider, ProviderKind::Anthropic);
+    }
+
+    #[test]
+    fn commands_are_off_by_default() {
+        assert!(!Settings::default().allow_commands);
     }
 }

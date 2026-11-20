@@ -18,6 +18,7 @@ path = "src/main.rs"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = "3"
 
 # Desktop build (used for fast development and tests).
 [target.'cfg(not(target_os = "android"))'.dependencies]

@@ -6,9 +6,12 @@
 
 pub mod agent;
 pub mod app;
+pub mod llm;
 pub mod project;
+pub mod secrets;
 pub mod settings;
 pub mod shell;
+pub mod tools;
 mod ui;
 
 use std::path::PathBuf;
