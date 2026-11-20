@@ -15,9 +15,12 @@ name = "zn-desktop"
 path = "src/main.rs"
 
 [dependencies]
+candle-core = "0.11"
+candle-transformers = "0.11"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 ureq = "3"
 
 # Desktop build (used for fast development and tests).
@@ -61,3 +64,9 @@ label = "Zn"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
+
+# On-device inference is unusably slow without optimizations, and `cargo apk build`
+# uses the dev profile, so optimize it. Debug info is dropped to keep the APK small.
+[profile.dev]
+opt-level = 3
+debug = false

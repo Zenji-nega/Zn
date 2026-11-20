@@ -110,6 +110,13 @@ impl Toolbox {
     }
 
     fn dispatch(&mut self, name: &str, input: &Value) -> Result<String, String> {
+        if name == crate::local::prompt::INVALID_CALL {
+            let raw = input.as_str().unwrap_or_default();
+            return Err(format!(
+                "your tool call could not be parsed as JSON: {raw}\nWrite it as \
+                 <tool_call>{{\"name\": \"<tool>\", \"arguments\": {{...}}}}</tool_call> with valid JSON."
+            ));
+        }
         if !input.is_object() {
             return Err("the arguments must be a JSON object".into());
         }

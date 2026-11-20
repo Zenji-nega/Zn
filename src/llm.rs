@@ -4,7 +4,10 @@
 //! translates them to its wire format; the request builders and response
 //! parsers are pure functions so they can be tested without a network.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 
@@ -47,6 +50,9 @@ pub struct Completion {
 
 pub trait Provider: Send {
     fn name(&self) -> String;
+
+    /// Gives long-running providers (on-device models) the agent's stop flag.
+    fn attach_cancel(&mut self, _cancel: Arc<AtomicBool>) {}
 
     /// Blocking: sends the conversation and returns the model's next turn.
     fn complete(

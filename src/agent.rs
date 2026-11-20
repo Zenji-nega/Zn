@@ -111,7 +111,7 @@ impl AgentSession {
     pub fn send(
         &mut self,
         text: &str,
-        provider: Box<dyn Provider>,
+        mut provider: Box<dyn Provider>,
         toolbox: Toolbox,
         repaint: impl Fn() + Send + 'static,
     ) {
@@ -122,6 +122,7 @@ impl AgentSession {
         self.entries.push(ChatEntry::User(text.to_owned()));
         self.conversation.push(Message::User(text.to_owned()));
         self.cancel.store(false, Ordering::Relaxed);
+        provider.attach_cancel(Arc::clone(&self.cancel));
 
         let conversation = self.conversation.clone();
         let cancel = Arc::clone(&self.cancel);
@@ -185,6 +186,10 @@ fn run_loop(
         }
         let completion = match provider.complete(SYSTEM_PROMPT, &conversation, &specs) {
             Ok(completion) => completion,
+            Err(_) if cancel.load(Ordering::Relaxed) => {
+                say(ChatEntry::System("Stopped.".into()));
+                return;
+            }
             Err(err) => {
                 say(ChatEntry::System(format!("Error: {err}")));
                 return;

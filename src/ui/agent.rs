@@ -17,6 +17,7 @@ impl ZnApp {
         let model = match self.settings.provider {
             crate::settings::ProviderKind::Anthropic => &self.settings.anthropic_model,
             crate::settings::ProviderKind::OpenAiCompatible => &self.settings.openai_model,
+            crate::settings::ProviderKind::OnDevice => &self.settings.local_model,
         };
         ui.weak(format!(
             "{} · {model} · project: {project}",
@@ -78,7 +79,8 @@ impl ZnApp {
                 if self.agent.is_busy() {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.weak("Working…");
+                        let status = self.local_host.progress.describe();
+                        ui.weak(status.unwrap_or_else(|| "Working…".to_owned()));
                     });
                 }
             });

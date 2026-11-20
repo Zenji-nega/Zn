@@ -12,6 +12,11 @@ use eframe::egui;
 use crate::{
     agent::{AgentSession, PollOutcome},
     llm::{Anthropic, Http, OpenAiCompat, Provider, UreqHttp},
+    local::{
+        LocalHost, LocalProvider,
+        engine::EngineConfig,
+        models::{self, Download, ModelEntry},
+    },
     project::{Project, ProjectKind, ProjectStore},
     secrets::Secrets,
     settings::{ProviderKind, Settings},
@@ -48,10 +53,24 @@ impl Tab {
     }
 }
 
+/// Form fields for downloading any GGUF model by link.
+#[derive(Default)]
+pub struct CustomModel {
+    pub name: String,
+    pub gguf_url: String,
+    pub tokenizer_url: String,
+}
+
 pub struct ZnApp {
     pub(crate) data_dir: PathBuf,
     pub(crate) settings: Settings,
     pub(crate) secrets: Secrets,
+    pub(crate) local_host: Arc<LocalHost>,
+    pub(crate) local_models: Vec<ModelEntry>,
+    pub(crate) download: Option<Download>,
+    /// Result of the last download attempt, shown in Settings.
+    pub(crate) download_note: Option<String>,
+    pub(crate) custom_model: CustomModel,
     pub(crate) store: ProjectStore,
     pub(crate) tab: Tab,
 
@@ -82,10 +101,15 @@ impl ZnApp {
         apply_settings(&cc.egui_ctx, &settings);
         let store = ProjectStore::new(&data_dir)?;
         let projects = store.list().unwrap_or_default();
-        Ok(Self {
+        let mut app = Self {
             data_dir,
             settings,
             secrets,
+            local_host: LocalHost::new(),
+            local_models: Vec::new(),
+            download: None,
+            download_note: None,
+            custom_model: CustomModel::default(),
             store,
             tab: Tab::Projects,
             projects,
@@ -102,7 +126,9 @@ impl ZnApp {
             chat_input: String::new(),
             shell: ShellSession::default(),
             shell_input: String::new(),
-        })
+        };
+        app.refresh_local_models();
+        Ok(app)
     }
 
     pub(crate) fn refresh_projects(&mut self) {
@@ -207,6 +233,18 @@ impl ZnApp {
                     base_url: Anthropic::DEFAULT_BASE_URL.to_owned(),
                 }))
             }
+            ProviderKind::OnDevice => {
+                let models = models::list_models(&self.data_dir);
+                let model = models
+                    .into_iter()
+                    .find(|m| m.id == s.local_model)
+                    .ok_or("Download or choose an on-device model in Settings first.")?;
+                Ok(Box::new(LocalProvider::new(
+                    Arc::clone(&self.local_host),
+                    model,
+                    EngineConfig::default(),
+                )))
+            }
             ProviderKind::OpenAiCompatible => {
                 if s.openai_model.trim().is_empty() {
                     return Err("Set a model name in Settings first.".into());
@@ -244,6 +282,58 @@ impl ZnApp {
                 self.chat_input = text;
                 self.agent.note(problem);
             }
+        }
+    }
+
+    pub(crate) fn refresh_local_models(&mut self) {
+        self.local_models = models::list_models(&self.data_dir);
+        if self.settings.local_model.is_empty()
+            && let Some(first) = self.local_models.first()
+        {
+            self.settings.local_model = first.id.clone();
+        }
+    }
+
+    /// Starts downloading a model unless one is already downloading.
+    pub(crate) fn begin_download(
+        &mut self,
+        ctx: &egui::Context,
+        id: &str,
+        gguf_url: &str,
+        tokenizer_url: &str,
+    ) {
+        if self.download.is_some() {
+            return;
+        }
+        let repaint = repaint_handle(ctx);
+        match models::start_download(&self.data_dir, id, gguf_url, tokenizer_url, move || {
+            repaint()
+        }) {
+            Ok(job) => {
+                self.download_note = None;
+                self.download = Some(job);
+            }
+            Err(problem) => self.download_note = Some(problem),
+        }
+    }
+
+    fn poll_download(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.download else { return };
+        ctx.request_repaint_after(Duration::from_millis(250));
+        let Some(result) = job.poll() else { return };
+        let id = job.id.clone();
+        self.download = None;
+        self.download_note = Some(match result {
+            Ok(()) => format!("Downloaded \"{id}\"."),
+            Err(err) if err == "cancelled" => {
+                "Download cancelled. Start it again to resume.".to_owned()
+            }
+            Err(err) => format!("Download failed: {err}"),
+        });
+        self.refresh_local_models();
+        if self.local_models.iter().any(|m| m.id == id) {
+            self.settings.local_model = id;
+            let _ = self.settings.save(&self.data_dir);
         }
     }
 
@@ -297,6 +387,7 @@ pub(crate) fn repaint_handle(ctx: &egui::Context) -> Arc<dyn Fn() + Send + Sync>
 impl eframe::App for ZnApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let outcome = self.agent.poll();
+        self.poll_download(ui.ctx());
         self.apply_agent_outcome(outcome);
         self.shell.poll();
         if self.agent.is_busy() || self.shell.is_running() {
