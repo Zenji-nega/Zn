@@ -14,15 +14,18 @@ const FILE_NAME: &str = "settings.json";
 pub enum ProviderKind {
     Anthropic,
     OpenAiCompatible,
+    /// A model file running on this device, no internet needed.
+    OnDevice,
 }
 
 impl ProviderKind {
-    pub const ALL: [Self; 2] = [Self::Anthropic, Self::OpenAiCompatible];
+    pub const ALL: [Self; 3] = [Self::Anthropic, Self::OpenAiCompatible, Self::OnDevice];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Anthropic => "Anthropic (Claude)",
             Self::OpenAiCompatible => "OpenAI-compatible",
+            Self::OnDevice => "On-device (offline)",
         }
     }
 }
@@ -39,6 +42,8 @@ pub struct Settings {
     pub anthropic_model: String,
     pub openai_base_url: String,
     pub openai_model: String,
+    /// Folder name of the chosen on-device model.
+    pub local_model: String,
     /// Lets the agent run shell commands in the project. Off by default.
     pub allow_commands: bool,
 }
@@ -74,6 +79,7 @@ impl Default for Settings {
             anthropic_model: Anthropic::DEFAULT_MODEL.to_owned(),
             openai_base_url: OpenAiCompat::DEFAULT_BASE_URL.to_owned(),
             openai_model: String::new(),
+            local_model: String::new(),
             allow_commands: false,
         }
     }

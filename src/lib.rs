@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod app;
 pub mod llm;
+pub mod local;
 pub mod project;
 pub mod secrets;
 pub mod settings;
