@@ -11,11 +11,11 @@ What works today (covered by unit tests, desktop-verified):
 |------|-------|
 | Projects | Create App / Game (Godot 4) / Website projects from templates, list and open them |
 | Editor | Open, edit, save and add files inside a project (paths cannot escape the project folder) |
-| Agent | Chat UI and a background-thread `AgentBackend` trait. Only a **placeholder** backend exists, no AI model is connected yet |
+| Agent | Real AI agent: a tool-using loop (`create_project`, `list_files`, `read_file`, `write_file`, optional `run_command`) on a worker thread, with Stop and a step cap. Works with **Anthropic** and any **OpenAI-compatible** server (OpenAI, OpenRouter, local servers). Needs your own API key |
 | Terminal | Runs one `sh -c` command at a time in the project directory, streams stdout/stderr |
-| Settings | Dark mode, UI size, GitHub username (saved as JSON) |
+| Settings | Dark mode, UI size, GitHub username, AI provider/model/key, and a switch for agent shell commands (off by default) |
 
-Not built yet: real AI backends (remote API or on-device model), Godot 4 export, web preview/publishing, GitHub integration, a bundled Linux environment.
+Not built yet: on-device (offline) models, streaming replies, Godot 4 export, web preview/publishing, GitHub integration, a bundled Linux environment.
 
 ## Project layout
 
@@ -25,7 +25,10 @@ src/main.rs       desktop entry point for fast development
 src/app.rs        app state, tab bar, per-frame polling
 src/ui/           one file per tab
 src/project.rs    templates, listing, safe file access
-src/agent.rs      AgentBackend trait + threaded AgentSession
+src/agent.rs      agent loop + threaded AgentSession
+src/llm.rs        Anthropic / OpenAI-compatible adapters (pure request/response code)
+src/tools.rs      the tools the agent can call, scoped to the open project
+src/secrets.rs    API keys (separate file, owner-only permissions)
 src/shell.rs      in-app terminal
 src/settings.rs   persisted settings
 ```
@@ -51,11 +54,18 @@ cargo apk run --lib            # install and launch on a connected device
 
 Or run the **Android APK** workflow from the repository's Actions tab and download the `zn-apk` artifact.
 
-> The Android build has not been run yet. The code was only compiled for desktop, so the first CI run may need small fixes to the `cargo-apk` metadata in `Cargo.toml`.
+
+## Using the agent
+
+1. Open **Settings**, choose a provider, enter the model name and your API key.
+2. Go to **Agent** and describe what you want. The agent creates a project if none is open, writes files, and shows each tool call (tap one to see its output).
+3. Open the **Editor** tab to see and tweak the result.
 
 ## Known limitations
 
 - egui does not shape Arabic or lay out right-to-left text, so the UI is English for now. Arabic characters render through system fonts but joined letters will look disconnected.
 - `accesskit` (screen reader support) is disabled on Android because eframe cannot combine it with `native-activity`.
 - The terminal uses the Android system shell; there is no bundled Linux userland yet.
-- Settings never store secrets. API keys and GitHub tokens need a proper secure-storage design before they are added.
+- API keys are saved unencrypted in the app's private folder (`secrets.json`, owner-only). Android Keystore support would be a later upgrade. GitHub tokens are not stored at all yet.
+- With "Let the agent run shell commands" on, the agent runs commands without asking each time. Leave it off unless you want that. On a desktop build the commands run with your user's permissions.
+- The model sees the whole conversation on every request; there is no history trimming yet, so very long chats will get slow and costly.

@@ -7,8 +7,12 @@ use std::{
     io::{BufRead, BufReader, Read},
     path::Path,
     process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
     thread,
+    time::{Duration, Instant},
 };
 
 const MAX_LINES: usize = 5000;
@@ -131,6 +135,101 @@ fn spawn_reader(
     })
 }
 
+/// Result of [`run_capture`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct Captured {
+    /// stdout and stderr, interleaved; only the last `max_chars` characters are kept.
+    pub output: String,
+    pub code: Option<i32>,
+    pub timed_out: bool,
+}
+
+/// Runs `command` with `sh -c`, waits for it (killing it after `timeout`) and
+/// returns what it printed. Used by the AI agent, which needs the whole result.
+pub fn run_capture(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    max_chars: usize,
+) -> std::io::Result<Captured> {
+    // Never let a runaway process buffer unbounded output in memory.
+    const HARD_CAP: usize = 4 * 1024 * 1024;
+
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    let mut readers = 0;
+    let streams: [Option<Box<dyn Read + Send>>; 2] = [
+        child.stdout.take().map(|s| Box::new(s) as _),
+        child.stderr.take().map(|s| Box::new(s) as _),
+    ];
+    for mut stream in streams.into_iter().flatten() {
+        readers += 1;
+        let buffer = Arc::clone(&buffer);
+        let done = done_tx.clone();
+        thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = stream.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                if let Ok(mut buf) = buffer.lock()
+                    && buf.len() < HARD_CAP
+                {
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+            }
+            let _ = done.send(());
+        });
+    }
+
+    let deadline = Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status.code();
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        thread::sleep(Duration::from_millis(15));
+    };
+
+    // Let the readers drain what is left, but never hang on a background
+    // process that inherited the pipes.
+    for _ in 0..readers {
+        if done_rx.recv_timeout(Duration::from_millis(500)).is_err() {
+            break;
+        }
+    }
+
+    let bytes = buffer.lock().map(|b| b.clone()).unwrap_or_default();
+    let text = String::from_utf8_lossy(&bytes);
+    let total = text.chars().count();
+    let output = if total > max_chars {
+        let tail: String = text.chars().skip(total - max_chars).collect();
+        format!("[... output truncated ...]\n{tail}")
+    } else {
+        text.into_owned()
+    };
+    Ok(Captured {
+        output,
+        code: status,
+        timed_out,
+    })
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use std::time::{Duration, Instant};
@@ -174,5 +273,44 @@ mod tests {
         assert!(shell.output.is_empty() && !shell.is_running());
         let out = run_to_end("pwd");
         assert!(out[1].starts_with('/'));
+    }
+
+    #[test]
+    fn capture_returns_output_and_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = run_capture(
+            "echo out; echo err >&2; exit 2",
+            dir.path(),
+            Duration::from_secs(10),
+            1000,
+        )
+        .unwrap();
+        assert_eq!(got.code, Some(2));
+        assert!(!got.timed_out);
+        assert!(got.output.contains("out") && got.output.contains("err"));
+    }
+
+    #[test]
+    fn capture_kills_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = Instant::now();
+        let got = run_capture(
+            "echo started; sleep 30",
+            dir.path(),
+            Duration::from_millis(300),
+            1000,
+        )
+        .unwrap();
+        assert!(got.timed_out && got.code.is_none());
+        assert!(got.output.contains("started"));
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn capture_keeps_only_the_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = run_capture("seq 1 2000", dir.path(), Duration::from_secs(10), 50).unwrap();
+        assert!(got.output.starts_with("[... output truncated ...]"));
+        assert!(got.output.trim_end().ends_with("2000"));
     }
 }
