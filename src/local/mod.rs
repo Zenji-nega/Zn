@@ -1,5 +1,6 @@
 //! On-device models: run open-source LLMs directly on the phone, offline.
 
+pub mod cpu;
 pub mod engine;
 pub mod models;
 pub mod prompt;
@@ -20,18 +21,21 @@ use models::ModelEntry;
 /// Sizes the CPU thread pool used by the model code. Call once, before any model runs.
 ///
 /// Using every core would starve the UI thread (and the slow cores drag the fast ones),
-/// so by default only half of them are used.
+/// so by default only the fast cores are used.
 pub fn configure_threads(requested: usize) {
     let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
     let threads = if requested > 0 {
         requested.min(cores)
     } else {
-        (cores / 2).max(2).min(cores)
+        cpu::default_threads(cores)
     };
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .stack_size(8 << 20)
-        .start_handler(|_| crate::diag::install_thread_altstack())
+        .start_handler(|_| {
+            crate::diag::install_thread_altstack();
+            cpu::prefer_fast_cores();
+        })
         .build_global();
 }
 
@@ -118,7 +122,14 @@ impl Provider for LocalProvider {
         }
         let (_, engine) = slot.as_mut().ok_or("model not loaded")?;
 
-        let prompt = prompt::render(engine.template(), system, conversation, tools);
+        // Small models on phones read the prompt slowly, so use the short instructions.
+        let _ = system;
+        let prompt = prompt::render_compact(
+            engine.template(),
+            prompt::COMPACT_SYSTEM,
+            conversation,
+            tools,
+        );
         // On a stop request this returns an error; the agent loop checks its own flag
         // and reports "Stopped." instead of showing it.
         let raw = engine.generate(&prompt, &self.cancel)?;

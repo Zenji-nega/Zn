@@ -62,7 +62,31 @@ fn to_json(value: &Value) -> String {
     }
 }
 
-fn system_block(system: &str, tools: &[ToolSpec]) -> String {
+/// Short instructions for small on-device models: every prompt token costs seconds on a phone.
+pub const COMPACT_SYSTEM: &str = "You are Zn, a coding assistant in a phone app. Build what the user asks by calling tools. \
+Create a project first if none is open. Websites: plain HTML/CSS/JS with index.html. Games: Godot 4 (GDScript). \
+Write complete files. Keep replies short and use the user's language.";
+
+/// Drops parameter descriptions and keeps only the first sentence of the tool description.
+fn compact_spec(tool: &ToolSpec) -> Value {
+    let mut schema = tool.schema.clone();
+    if let Some(props) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        for prop in props.values_mut() {
+            if let Some(obj) = prop.as_object_mut() {
+                obj.remove("description");
+            }
+        }
+    }
+    let first = tool
+        .description
+        .split_inclusive(". ")
+        .next()
+        .unwrap_or(tool.description)
+        .trim();
+    json!({ "type": "function", "function": { "name": tool.name, "description": first, "parameters": schema } })
+}
+
+fn system_block(system: &str, tools: &[ToolSpec], compact: bool) -> String {
     if tools.is_empty() {
         return system.to_owned();
     }
@@ -71,10 +95,14 @@ fn system_block(system: &str, tools: &[ToolSpec]) -> String {
          You are provided with function signatures within <tools></tools> XML tags:\n<tools>"
     );
     for tool in tools {
-        let spec = json!({
-            "type": "function",
-            "function": { "name": tool.name, "description": tool.description, "parameters": tool.schema }
-        });
+        let spec = if compact {
+            compact_spec(tool)
+        } else {
+            json!({
+                "type": "function",
+                "function": { "name": tool.name, "description": tool.description, "parameters": tool.schema }
+            })
+        };
         text.push('\n');
         text.push_str(&to_json(&spec));
     }
@@ -93,9 +121,29 @@ pub fn render(
     conversation: &[Message],
     tools: &[ToolSpec],
 ) -> String {
+    render_with(template, system, conversation, tools, false)
+}
+
+/// Like [`render`] but with trimmed tool descriptions, for slow on-device models.
+pub fn render_compact(
+    template: Template,
+    system: &str,
+    conversation: &[Message],
+    tools: &[ToolSpec],
+) -> String {
+    render_with(template, system, conversation, tools, true)
+}
+
+fn render_with(
+    template: Template,
+    system: &str,
+    conversation: &[Message],
+    tools: &[ToolSpec],
+    compact: bool,
+) -> String {
     let mut out = format!(
         "<|im_start|>system\n{}<|im_end|>\n",
-        system_block(system, tools)
+        system_block(system, tools, compact)
     );
     for message in conversation {
         match message {
@@ -355,5 +403,28 @@ mod tests {
         }];
         let prompt = render(Template::Qwen2, "S", &conv, &[]);
         assert!(prompt.contains(&format!("<|im_start|>assistant\n{written}<|im_end|>")));
+    }
+
+    #[test]
+    fn compact_prompt_is_much_shorter_and_keeps_tool_names() {
+        let tools = vec![
+            ToolSpec {
+                name: "write_file",
+                description: "Create or overwrite a file. Parent folders are created. Be complete.",
+                schema: json!({"type": "object", "properties": {
+                    "path": {"type": "string", "description": "Relative to the project root"}
+                }, "required": ["path"]}),
+            },
+            spec(),
+        ];
+        let conv = vec![Message::User("hi".into())];
+        let full = render(Template::Qwen2, COMPACT_SYSTEM, &conv, &tools);
+        let short = render_compact(Template::Qwen2, COMPACT_SYSTEM, &conv, &tools);
+        assert!(short.len() < full.len());
+        assert!(short.contains("\"name\": \"write_file\""));
+        assert!(short.contains("Create or overwrite a file."));
+        assert!(!short.contains("Parent folders"));
+        assert!(!short.contains("Relative to the project root"));
+        assert!(short.ends_with("<|im_start|>assistant\n"));
     }
 }

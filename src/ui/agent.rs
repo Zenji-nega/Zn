@@ -77,11 +77,8 @@ impl ZnApp {
                     }
                 }
                 if self.agent.is_busy() {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        let status = self.local_host.progress.describe();
-                        ui.weak(status.unwrap_or_else(|| "Working…".to_owned()));
-                    });
+                    let status = self.local_host.progress.describe();
+                    ui.weak(status.unwrap_or_else(|| "Working…".to_owned()));
                 }
             });
     }

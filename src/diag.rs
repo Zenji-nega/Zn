@@ -122,6 +122,7 @@ pub fn spawn_big<F: FnOnce() + Send + 'static>(name: &str, work: F) -> io::Resul
             .stack_size(megabytes << 20)
             .spawn(move || {
                 install_thread_altstack();
+                crate::local::cpu::prefer_fast_cores();
                 if let Some(work) = slot.lock().ok().and_then(|mut s| s.take()) {
                     work();
                 }
