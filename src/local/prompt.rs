@@ -199,6 +199,22 @@ pub fn parse_output(raw: &str, next_id: &mut usize) -> Completion {
         rest = remaining;
     }
     text.push_str(rest);
+    // Small models often forget the <tool_call> tags and answer with the bare JSON object.
+    if calls.is_empty() {
+        let bare = text
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+        let looks_like_call = serde_json::from_str::<Value>(bare).is_ok_and(|v| {
+            v.get("name").is_some_and(Value::is_string) && v.get("arguments").is_some()
+        });
+        if looks_like_call {
+            calls.push(parse_call(bare, next_id));
+            text.clear();
+        }
+    }
     Completion {
         text: text.trim().to_owned(),
         calls,
@@ -426,5 +442,19 @@ mod tests {
         assert!(!short.contains("Parent folders"));
         assert!(!short.contains("Relative to the project root"));
         assert!(short.ends_with("<|im_start|>assistant\n"));
+    }
+
+    #[test]
+    fn a_bare_json_call_without_tags_is_still_a_call() {
+        let mut id = 0;
+        let out = parse_output(
+            r#"{"name": "create_project", "arguments": {"name": "p", "kind": "app"}}"#,
+            &mut id,
+        );
+        assert_eq!(out.text, "");
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].name, "create_project");
+        let plain = parse_output(r#"Use {"name": 1} here"#, &mut id);
+        assert!(plain.calls.is_empty());
     }
 }

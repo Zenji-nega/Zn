@@ -247,6 +247,12 @@ mod signals {
                 libc::write(fd, buf.as_ptr().cast::<c_void>(), len);
             }
         }
+        // Returning would re-run the faulting instruction and loop forever, so hand the
+        // signal back to the system: the re-run then ends the process.
+        // SAFETY: `signal` is async-signal-safe.
+        unsafe {
+            libc::signal(signal, libc::SIG_DFL);
+        }
     }
 }
 
