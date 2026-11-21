@@ -82,7 +82,7 @@ Pick **On-device (offline)** in Settings, download a model, and the agent runs i
 
 ## Known limitations
 
-- egui on Android has no long-press text menu, so copy and paste use buttons: **Copy** on chat messages and tool output, **Copy all** / **Paste** in the editor, **Paste** beside every text field and the chat and terminal inputs. They use the Android system clipboard (JNI; compiled by CI, not tested on a device). Selecting part of a text by touch is not supported.
+- egui on Android has no long-press text menu, so copy and paste use buttons: **Copy** on chat messages and tool output, **Copy all** / **Paste** in the editor, **Paste** beside every text field and the chat and terminal inputs. They use the Android system clipboard (JNI; compiled by CI, not tested on a device). Chat messages and tool output also have a **Select** button that opens the text full-screen: drag over it, then tap **Copy selection**.
 
 - `vendor/candle-core` is candle-core 0.11.1 with one patch: upstream's quantized ARM kernels use the SDOT instruction unconditionally and crash (SIGILL) on phones older than ARMv8.2 such as the Galaxy M31; the patch falls back to plain NEON there. Remove it once upstream fixes this.
 

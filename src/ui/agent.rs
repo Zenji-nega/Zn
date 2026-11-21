@@ -67,6 +67,7 @@ impl ZnApp {
             self.send_to_agent(&ctx);
         }
 
+        let mut select: Option<String> = None;
         egui::ScrollArea::vertical()
             .auto_shrink(false)
             .stick_to_bottom(true)
@@ -76,8 +77,16 @@ impl ZnApp {
                 }
                 for entry in &self.agent.entries {
                     match entry {
-                        ChatEntry::User(text) => bubble(ui, "You", text),
-                        ChatEntry::Assistant(text) => bubble(ui, "Agent", text),
+                        ChatEntry::User(text) => {
+                            if bubble(ui, "You", text) {
+                                select = Some(text.clone());
+                            }
+                        }
+                        ChatEntry::Assistant(text) => {
+                            if bubble(ui, "Agent", text) {
+                                select = Some(text.clone());
+                            }
+                        }
                         ChatEntry::System(text) => {
                             ui.colored_label(ui.visuals().warn_fg_color, text);
                         }
@@ -86,9 +95,14 @@ impl ZnApp {
                             egui::CollapsingHeader::new(format!("{mark} {summary}"))
                                 .id_salt(summary.as_str().to_owned() + detail)
                                 .show(ui, |ui| {
-                                    if ui.small_button("Copy").clicked() {
-                                        super::copy_text(ui.ctx(), detail);
-                                    }
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("Copy").clicked() {
+                                            super::copy_text(ui.ctx(), detail);
+                                        }
+                                        if ui.small_button("Select").clicked() {
+                                            select = Some(detail.clone());
+                                        }
+                                    });
                                     ui.monospace(detail);
                                 });
                         }
@@ -99,10 +113,16 @@ impl ZnApp {
                     ui.weak(status.unwrap_or_else(|| "Working…".to_owned()));
                 }
             });
+        if select.is_some() {
+            self.select_range = 0..0;
+            self.select_text = select;
+        }
     }
 }
 
-fn bubble(ui: &mut egui::Ui, who: &str, text: &str) {
+/// Draws one chat message; returns true when "Select" was tapped.
+fn bubble(ui: &mut egui::Ui, who: &str, text: &str) -> bool {
+    let mut select = false;
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -110,7 +130,9 @@ fn bubble(ui: &mut egui::Ui, who: &str, text: &str) {
             if ui.small_button("Copy").clicked() {
                 super::copy_text(ui.ctx(), text);
             }
+            select = ui.small_button("Select").clicked();
         });
         ui.label(text);
     });
+    select
 }

@@ -104,6 +104,11 @@ pub struct ZnApp {
     pub(crate) shell: ShellSession,
     pub(crate) shell_input: String,
 
+    /// Text shown on the full-screen "select and copy" view, when open.
+    pub(crate) select_text: Option<String>,
+    /// Last selected character range on that view.
+    pub(crate) select_range: std::ops::Range<usize>,
+
     /// Local web server for previewing websites; started on first use.
     pub(crate) preview: Option<crate::preview::PreviewServer>,
     /// Result of the last "Preview" tap.
@@ -177,6 +182,8 @@ impl ZnApp {
             agent: AgentSession::new(),
             chat_input: String::new(),
             shell: ShellSession::default(),
+            select_text: None,
+            select_range: 0..0,
             preview: None,
             preview_note: None,
             shell_input: String::new(),
@@ -511,12 +518,18 @@ impl eframe::App for ZnApp {
             });
         });
 
-        egui::CentralPanel::default().show(ui, |ui| match self.tab {
-            Tab::Projects => self.ui_projects(ui),
-            Tab::Editor => self.ui_editor(ui),
-            Tab::Agent => self.ui_agent(ui),
-            Tab::Terminal => self.ui_terminal(ui),
-            Tab::Settings => self.ui_settings(ui),
+        egui::CentralPanel::default().show(ui, |ui| {
+            if self.select_text.is_some() {
+                self.ui_select(ui);
+                return;
+            }
+            match self.tab {
+                Tab::Projects => self.ui_projects(ui),
+                Tab::Editor => self.ui_editor(ui),
+                Tab::Agent => self.ui_agent(ui),
+                Tab::Terminal => self.ui_terminal(ui),
+                Tab::Settings => self.ui_settings(ui),
+            }
         });
     }
 }
