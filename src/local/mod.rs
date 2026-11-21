@@ -3,6 +3,7 @@
 pub mod engine;
 pub mod models;
 pub mod prompt;
+mod qwen2;
 
 use std::{
     path::PathBuf,
@@ -15,6 +16,24 @@ use std::{
 use crate::llm::{Completion, Message, Provider, ToolSpec};
 use engine::{Engine, EngineConfig, Progress};
 use models::ModelEntry;
+
+/// Sizes the CPU thread pool used by the model code. Call once, before any model runs.
+///
+/// Using every core would starve the UI thread (and the slow cores drag the fast ones),
+/// so by default only half of them are used.
+pub fn configure_threads(requested: usize) {
+    let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let threads = if requested > 0 {
+        requested.min(cores)
+    } else {
+        (cores / 2).max(2).min(cores)
+    };
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .stack_size(8 << 20)
+        .start_handler(|_| crate::diag::install_thread_altstack())
+        .build_global();
+}
 
 /// Holds the loaded model so it survives between requests (loading takes seconds
 /// and the weights take hundreds of megabytes of memory).
@@ -91,7 +110,7 @@ impl Provider for LocalProvider {
             *slot = None; // free the old model before loading the new one
             let engine = Engine::load(
                 &self.model.gguf,
-                &self.model.tokenizer,
+                self.model.tokenizer.as_deref(),
                 self.config.clone(),
                 Arc::clone(&self.host.progress),
             )?;
@@ -120,8 +139,9 @@ mod tests {
         let model = ModelEntry {
             id: "tiny".into(),
             gguf,
-            tokenizer,
+            tokenizer: Some(tokenizer),
             size_bytes: 1,
+            external: false,
         };
         let config = EngineConfig {
             n_ctx: 4096,

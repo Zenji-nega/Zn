@@ -8,6 +8,19 @@ use crate::{
 
 impl ZnApp {
     pub(crate) fn ui_settings(&mut self, ui: &mut egui::Ui) {
+        // Everything scrolls: on a phone the model manager is taller than the screen.
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                if self.picker.is_some() {
+                    self.ui_picker(ui);
+                } else {
+                    self.ui_settings_body(ui);
+                }
+            });
+    }
+
+    fn ui_settings_body(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
         ui.add_space(4.0);
 
@@ -122,7 +135,7 @@ impl ZnApp {
         if self.local_models.is_empty() {
             ui.label("No model installed yet. Download one below.");
         }
-        let mut delete: Option<String> = None;
+        let mut delete: Option<(String, bool)> = None;
         for model in &self.local_models {
             ui.horizontal(|ui| {
                 let size = format!("{:.0} MB", model.size_bytes as f64 / 1_048_576.0);
@@ -133,22 +146,35 @@ impl ZnApp {
                         format!("{} · {size}", model.id),
                     )
                     .changed();
-                if ui.small_button("Delete").clicked() {
-                    delete = Some(model.id.clone());
+                let label = if model.external { "Remove" } else { "Delete" };
+                if ui.small_button(label).clicked() {
+                    delete = Some((model.id.clone(), model.external));
+                }
+                if model.external && model.size_bytes == 0 {
+                    ui.colored_label(ui.visuals().warn_fg_color, "file not found");
                 }
             });
         }
-        if let Some(id) = delete {
-            if self.settings.local_model == id {
-                self.local_host.unload();
-                self.settings.local_model.clear();
+        if let Some((id, external)) = delete {
+            if external {
+                self.remove_external_model(&id);
                 changed = true;
+            } else {
+                if self.settings.local_model == id {
+                    self.local_host.unload();
+                    self.settings.local_model.clear();
+                    changed = true;
+                }
+                if let Err(err) = models::delete_model(&self.data_dir, &id) {
+                    self.download_note = Some(format!("Could not delete: {err}"));
+                }
+                self.refresh_local_models();
             }
-            if let Err(err) = models::delete_model(&self.data_dir, &id) {
-                self.download_note = Some(format!("Could not delete: {err}"));
-            }
-            self.refresh_local_models();
         }
+        ui.weak(format!(
+            "Available memory: {}",
+            crate::diag::memory_summary().trim_start_matches("RAM ")
+        ));
         ui.horizontal(|ui| {
             let loaded = self.local_host.is_loaded();
             if ui
@@ -163,6 +189,29 @@ impl ZnApp {
                 "Model is not loaded."
             });
         });
+
+        ui.separator();
+        ui.label("Use a model file already on this device");
+        ui.weak("Pick a .gguf file from your storage (Qwen2 or Qwen3 models). It is used where it is, not copied.");
+        if ui.button("Choose a model file…").clicked() {
+            self.open_model_picker();
+        }
+        if self.storage_prompt {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "To read files from your storage, Android needs you to allow \"All files access\" for this app.",
+            );
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Allow access to files").clicked()
+                    && let Err(err) = crate::platform::request_storage_access()
+                {
+                    self.download_note = Some(format!("Could not open the settings page: {err}"));
+                }
+                if ui.button("I allowed it, continue").clicked() {
+                    self.open_model_picker();
+                }
+            });
+        }
 
         ui.separator();
         ui.label("Download a model");
@@ -230,5 +279,123 @@ impl ZnApp {
             ui.colored_label(ui.visuals().warn_fg_color, note);
         }
         changed
+    }
+}
+
+impl ZnApp {
+    /// The "choose a model file" screen.
+    fn ui_picker(&mut self, ui: &mut egui::Ui) {
+        let Some(state) = self.picker.as_mut() else {
+            return;
+        };
+        let mut close = false;
+        let mut add: Option<(std::path::PathBuf, String)> = None;
+        let mut note: Option<String> = None;
+
+        ui.heading("Choose a model file");
+        if let Some(gguf) = state.chosen.clone() {
+            // Step 2: confirm and name it.
+            ui.label(gguf.display().to_string());
+            let entry = models::ExternalModel {
+                id: String::new(),
+                gguf: gguf.clone(),
+            }
+            .entry();
+            ui.weak(if entry.tokenizer.is_some() {
+                "A tokenizer.json next to the file will be used."
+            } else {
+                "The tokenizer built into the file will be used."
+            });
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut state.name).desired_width(f32::INFINITY));
+            ui.horizontal(|ui| {
+                if ui.button("Add").clicked() {
+                    add = Some((gguf, state.name.clone()));
+                }
+                if ui.button("Back").clicked() {
+                    state.chosen = None;
+                }
+            });
+        } else {
+            // Step 1: browse.
+            ui.horizontal_wrapped(|ui| {
+                for (label, path) in crate::platform::shortcuts() {
+                    if ui.small_button(label).clicked() {
+                        state.picker.go(path);
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.button("Up").clicked() {
+                    state.picker.up();
+                }
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut state.picker.path_text)
+                        .desired_width(f32::INFINITY),
+                );
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    state.picker.go_to_text();
+                }
+            });
+            if let Some(error) = &state.picker.error {
+                ui.colored_label(ui.visuals().warn_fg_color, error);
+            } else if state.picker.entries.is_empty() {
+                ui.weak("No folders or .gguf files here.");
+            }
+            ui.separator();
+            let mut enter: Option<String> = None;
+            let mut pick: Option<String> = None;
+            for entry in &state.picker.entries {
+                if entry.is_dir {
+                    if ui
+                        .selectable_label(false, format!("> {}", entry.name))
+                        .clicked()
+                    {
+                        enter = Some(entry.name.clone());
+                    }
+                } else {
+                    let label = format!(
+                        "{}  ·  {:.0} MB",
+                        entry.name,
+                        entry.size as f64 / 1_048_576.0
+                    );
+                    if ui.selectable_label(false, label).clicked() {
+                        pick = Some(entry.name.clone());
+                    }
+                }
+            }
+            if let Some(name) = enter {
+                state.picker.enter(&name);
+            }
+            if let Some(name) = pick {
+                let path = state.picker.file_path(&name);
+                state.name = models::ExternalModel::suggest_name(
+                    &path,
+                    &self
+                        .local_models
+                        .iter()
+                        .map(|m| m.id.clone())
+                        .collect::<Vec<_>>(),
+                );
+                state.chosen = Some(path);
+            }
+        }
+        ui.separator();
+        if ui.button("Cancel").clicked() {
+            close = true;
+        }
+
+        if let Some((gguf, name)) = add {
+            match self.add_external_model(gguf, &name) {
+                Ok(()) => close = true,
+                Err(problem) => note = Some(problem),
+            }
+        }
+        if let Some(problem) = note {
+            self.download_note = Some(problem);
+        }
+        if close {
+            self.picker = None;
+        }
     }
 }

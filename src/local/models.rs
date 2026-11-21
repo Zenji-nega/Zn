@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::project::sanitize_name;
 
 const GGUF_FILE: &str = "model.gguf";
@@ -24,8 +26,79 @@ const TOKENIZER_FILE: &str = "tokenizer.json";
 pub struct ModelEntry {
     pub id: String,
     pub gguf: PathBuf,
-    pub tokenizer: PathBuf,
+    /// `None` means: use the tokenizer built into the GGUF file.
+    pub tokenizer: Option<PathBuf>,
     pub size_bytes: u64,
+    /// A file somewhere on the device that the app only points to (not copied).
+    pub external: bool,
+}
+
+/// A model file the user picked on the device.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalModel {
+    pub id: String,
+    pub gguf: PathBuf,
+}
+
+impl ExternalModel {
+    pub const ID_PREFIX: &'static str = "file:";
+
+    /// A name for a picked file: its name without extension, made safe and unique.
+    pub fn suggest_name(gguf: &Path, taken: &[String]) -> String {
+        let stem = gguf
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let clean: String = stem
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let clean = clean.trim_start_matches('.').to_owned();
+        let base = if clean.is_empty() {
+            "model".to_owned()
+        } else {
+            clean
+        };
+        let mut name = base.clone();
+        let mut n = 2;
+        while taken
+            .iter()
+            .any(|id| id == &format!("{}{name}", Self::ID_PREFIX))
+        {
+            name = format!("{base}-{n}");
+            n += 1;
+        }
+        name
+    }
+
+    pub fn entry(&self) -> ModelEntry {
+        // A tokenizer.json next to the model wins; otherwise the one inside the GGUF is used.
+        let sibling = self
+            .gguf
+            .parent()
+            .map(|dir| dir.join(TOKENIZER_FILE))
+            .filter(|p| p.is_file());
+        ModelEntry {
+            id: self.id.clone(),
+            gguf: self.gguf.clone(),
+            tokenizer: sibling,
+            size_bytes: fs::metadata(&self.gguf).map_or(0, |m| m.len()),
+            external: true,
+        }
+    }
+}
+
+/// Downloaded models plus the files the user pointed to, downloaded ones first.
+pub fn all_models(data_dir: &Path, external: &[ExternalModel]) -> Vec<ModelEntry> {
+    let mut models = list_models(data_dir);
+    models.extend(external.iter().map(ExternalModel::entry));
+    models
 }
 
 pub struct Preset {
@@ -80,8 +153,9 @@ pub fn list_models(data_dir: &Path) -> Vec<ModelEntry> {
             tokenizer.is_file().then(|| ModelEntry {
                 id: entry.file_name().to_string_lossy().into_owned(),
                 gguf,
-                tokenizer,
+                tokenizer: Some(tokenizer),
                 size_bytes: size,
+                external: false,
             })
         })
         .collect();
@@ -477,6 +551,63 @@ mod tests {
         assert!(delete_model(data.path(), "../done").is_err());
         delete_model(data.path(), "done").unwrap();
         assert!(list_models(data.path()).is_empty());
+    }
+
+    #[test]
+    fn external_models_use_a_sibling_tokenizer_or_the_embedded_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let gguf = dir.path().join("My Model (Q4).gguf");
+        fs::write(&gguf, b"GGUFabcd").unwrap();
+        let model = ExternalModel {
+            id: "file:x".into(),
+            gguf: gguf.clone(),
+        };
+        let entry = model.entry();
+        assert!(entry.external && entry.tokenizer.is_none());
+        assert_eq!(entry.size_bytes, 8);
+
+        fs::write(dir.path().join(TOKENIZER_FILE), b"{}").unwrap();
+        assert_eq!(
+            model.entry().tokenizer,
+            Some(dir.path().join(TOKENIZER_FILE))
+        );
+
+        // A missing file is still listed (so it can be removed), with size 0.
+        let gone = ExternalModel {
+            id: "file:y".into(),
+            gguf: dir.path().join("gone.gguf"),
+        };
+        assert_eq!(gone.entry().size_bytes, 0);
+    }
+
+    #[test]
+    fn suggested_names_are_safe_and_unique() {
+        let taken = vec!["file:model".to_owned(), "file:model-2".to_owned()];
+        let name = |p: &str, taken: &[String]| ExternalModel::suggest_name(Path::new(p), taken);
+        assert_eq!(name("/a/Qwen 2.5 (Q4).gguf", &[]), "Qwen-2.5--Q4-");
+        assert_eq!(name("/a/model.gguf", &taken), "model-3");
+        assert_eq!(name("/a/.gguf", &[]), "gguf");
+        assert_eq!(name("/a/....", &[]), "model");
+    }
+
+    #[test]
+    fn all_models_lists_downloaded_before_external() {
+        let data = tempfile::tempdir().unwrap();
+        let root = models_dir(data.path());
+        fs::create_dir_all(root.join("dl")).unwrap();
+        fs::write(root.join("dl").join(GGUF_FILE), b"GGUF").unwrap();
+        fs::write(root.join("dl").join(TOKENIZER_FILE), b"{}").unwrap();
+        let ext = ExternalModel {
+            id: "file:z".into(),
+            gguf: data.path().join("z.gguf"),
+        };
+        let all = all_models(data.path(), &[ext]);
+        assert_eq!(
+            all.iter()
+                .map(|m| (m.id.as_str(), m.external))
+                .collect::<Vec<_>>(),
+            [("dl", false), ("file:z", true)]
+        );
     }
 
     #[test]

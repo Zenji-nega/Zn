@@ -1,13 +1,10 @@
 //! The AI agent: runs the model/tool loop on a worker thread and streams
 //! progress back to the UI through a channel.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, TryRecvError},
-    },
-    thread,
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, TryRecvError},
 };
 
 use crate::{
@@ -128,7 +125,7 @@ impl AgentSession {
         let cancel = Arc::clone(&self.cancel);
         let (tx, rx) = mpsc::channel();
         self.events = Some(rx);
-        thread::spawn(move || {
+        let spawned = crate::diag::spawn_big("zn-agent", move || {
             let emit = |event: Event| {
                 let _ = tx.send(event);
                 repaint();
@@ -136,6 +133,12 @@ impl AgentSession {
             run_loop(provider.as_ref(), toolbox, conversation, &cancel, &emit);
             emit(Event::Finished);
         });
+        if let Err(err) = spawned {
+            self.events = None;
+            self.entries.push(ChatEntry::System(format!(
+                "Error: could not start the agent: {err}"
+            )));
+        }
     }
 
     /// Applies finished work to the session. Call once per frame.
@@ -251,6 +254,7 @@ mod tests {
     use std::{
         collections::VecDeque,
         sync::Mutex,
+        thread,
         time::{Duration, Instant},
     };
 

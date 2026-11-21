@@ -6,8 +6,11 @@
 
 pub mod agent;
 pub mod app;
+pub mod diag;
+pub mod filepicker;
 pub mod llm;
 pub mod local;
+pub mod platform;
 pub mod project;
 pub mod secrets;
 pub mod settings;
@@ -37,10 +40,12 @@ pub fn default_data_dir() -> PathBuf {
 
 /// Starts the UI and blocks until the window or activity closes.
 pub fn run(data_dir: PathBuf, options: eframe::NativeOptions) -> eframe::Result {
+    let previous_session = diag::init(&data_dir);
+    local::configure_threads(settings::Settings::load(&data_dir).local_threads);
     eframe::run_native(
         "Zn",
         options,
-        Box::new(move |cc| Ok(Box::new(app::ZnApp::new(cc, data_dir)?))),
+        Box::new(move |cc| Ok(Box::new(app::ZnApp::new(cc, data_dir, previous_session)?))),
     )
 }
 
@@ -50,6 +55,8 @@ fn android_main(app: android_activity::AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
+    platform::init_android(&app);
+    diag::install_thread_altstack();
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/local/tmp/zn"));

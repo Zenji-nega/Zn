@@ -14,11 +14,13 @@ use std::{
     },
 };
 
-use candle_core::{Device, Tensor, quantized::gguf_file};
-use candle_transformers::{
-    generation::LogitsProcessor,
-    models::{quantized_qwen2, quantized_qwen3},
+use candle_core::{
+    Device, Tensor,
+    quantized::{gguf_file, tokenizer::TokenizerFromGguf},
 };
+use candle_transformers::{generation::LogitsProcessor, models::quantized_qwen3};
+
+use super::qwen2 as quantized_qwen2;
 use tokenizers::Tokenizer;
 
 use super::prompt::Template;
@@ -84,6 +86,25 @@ impl Progress {
     }
 }
 
+/// Builds the tokenizer stored inside the GGUF file and checks that it round-trips text.
+fn embedded_tokenizer(content: &gguf_file::Content) -> Result<Tokenizer, String> {
+    let tokenizer = Tokenizer::from_gguf(content).map_err(|e| {
+        format!("this model file has no usable built-in tokenizer ({e}). Put its tokenizer.json in the same folder.")
+    })?;
+    let sample = "Hello, wörld! 123  x\n\tend";
+    let round_trip = tokenizer
+        .encode(sample, false)
+        .ok()
+        .and_then(|enc| tokenizer.decode(enc.get_ids(), false).ok());
+    if round_trip.as_deref() != Some(sample) {
+        return Err(
+            "the tokenizer built into this model file failed a self-test. Put its tokenizer.json in the same folder."
+                .into(),
+        );
+    }
+    Ok(tokenizer)
+}
+
 enum Weights {
     Qwen2(quantized_qwen2::ModelWeights),
     Qwen3(quantized_qwen3::ModelWeights),
@@ -121,26 +142,39 @@ pub struct Engine {
 impl Engine {
     pub fn load(
         gguf: &Path,
-        tokenizer: &Path,
+        tokenizer: Option<&Path>,
         config: EngineConfig,
         progress: Arc<Progress>,
     ) -> Result<Self, String> {
         progress.set(Progress::LOADING, 0, 0);
+        let size_mb = std::fs::metadata(gguf).map_or(0, |m| m.len() / 1_048_576);
+        crate::diag::phase(format!(
+            "loading model {} ({size_mb} MB file)",
+            gguf.display()
+        ));
         let result = Self::load_inner(gguf, tokenizer, config, Arc::clone(&progress));
         if result.is_err() {
             progress.set(Progress::IDLE, 0, 0);
         }
+        crate::diag::idle();
         result
     }
 
     fn load_inner(
         gguf: &Path,
-        tokenizer: &Path,
+        tokenizer_path: Option<&Path>,
         config: EngineConfig,
         progress: Arc<Progress>,
     ) -> Result<Self, String> {
-        let tokenizer = Tokenizer::from_file(tokenizer)
-            .map_err(|e| format!("could not read the tokenizer: {e}"))?;
+        let file = File::open(gguf).map_err(|e| format!("could not open the model: {e}"))?;
+        let mut reader = BufReader::with_capacity(1 << 20, file);
+        let content = gguf_file::Content::read(&mut reader)
+            .map_err(|e| format!("not a valid GGUF file: {e}"))?;
+        let tokenizer = match tokenizer_path {
+            Some(path) => Tokenizer::from_file(path)
+                .map_err(|e| format!("could not read the tokenizer: {e}"))?,
+            None => embedded_tokenizer(&content)?,
+        };
         let mut stop_ids: Vec<u32> = ["<|im_end|>", "<|endoftext|>"]
             .iter()
             .filter_map(|t| tokenizer.token_to_id(t))
@@ -149,11 +183,6 @@ impl Engine {
         if tokenizer.token_to_id("<|im_end|>").is_none() {
             return Err("this model does not use the ChatML format (<|im_end|> is missing)".into());
         }
-
-        let file = File::open(gguf).map_err(|e| format!("could not open the model: {e}"))?;
-        let mut reader = BufReader::with_capacity(1 << 20, file);
-        let content = gguf_file::Content::read(&mut reader)
-            .map_err(|e| format!("not a valid GGUF file: {e}"))?;
         let arch = content
             .metadata
             .get("general.architecture")
@@ -212,7 +241,9 @@ impl Engine {
 
     /// Continues `prompt` and returns the raw reply text (without the stop token).
     pub fn generate(&mut self, prompt: &str, cancel: &AtomicBool) -> Result<String, String> {
+        crate::diag::phase("running the on-device model");
         let result = self.generate_inner(prompt, cancel);
+        crate::diag::idle();
         self.progress.set(Progress::IDLE, 0, 0);
         if result.is_err() {
             // The cache may be half-updated; start clean next time.
@@ -316,11 +347,11 @@ pub(crate) mod tests {
 
     use super::*;
 
-    const EMBED: usize = 16;
-    const HEADS: usize = 2;
-    const KV_HEADS: usize = 1;
+    const EMBED: usize = 32;
+    const HEADS: usize = 4;
+    const KV_HEADS: usize = 2;
     const HEAD_DIM: usize = EMBED / HEADS;
-    const FFN: usize = 32;
+    const FFN: usize = 64;
     const LAYERS: usize = 2;
     const WORDS: [&str; 12] = [
         "hello",
@@ -352,6 +383,15 @@ pub(crate) mod tests {
 
     /// Writes a tiny random tokenizer + qwen2 GGUF that exercise the whole code path.
     pub(crate) fn tiny_model(dir: &Path, arch: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        tiny_model_with(dir, arch, GgmlDType::F32)
+    }
+
+    /// Like [`tiny_model`], with the weight matrices stored as `dtype`.
+    pub(crate) fn tiny_model_with(
+        dir: &Path,
+        arch: &str,
+        dtype: GgmlDType,
+    ) -> (std::path::PathBuf, std::path::PathBuf) {
         let vocab = vocab();
         let model = WordLevel::builder()
             .vocab(vocab.iter().map(|(k, v)| (k.clone(), *v)).collect())
@@ -367,7 +407,18 @@ pub(crate) mod tests {
         tokenizer.add_special_tokens(specials).unwrap();
         let tokenizer_path = dir.join("tokenizer.json");
         tokenizer.save(&tokenizer_path, false).unwrap();
+        let gguf_path = write_tiny_gguf(dir, arch, dtype, vocab.len(), Vec::new());
+        (gguf_path, tokenizer_path)
+    }
 
+    /// Writes the weights file; `extra_meta` carries e.g. an embedded tokenizer.
+    fn write_tiny_gguf(
+        dir: &Path,
+        arch: &str,
+        dtype: GgmlDType,
+        vocab_rows: usize,
+        extra_meta: Vec<(String, Value)>,
+    ) -> std::path::PathBuf {
         let dev = Device::Cpu;
         // Deterministic pseudo-random weights, so tests are reproducible.
         let state = std::cell::Cell::new(0x2545_F491_4F6C_DD1Du64);
@@ -383,12 +434,12 @@ pub(crate) mod tests {
                 })
                 .collect()
         };
-        let quant = |values: Vec<f32>, shape: &[usize]| {
+        let quant = |values: Vec<f32>, shape: &[usize], dtype: GgmlDType| {
             let t = Tensor::from_vec(values, shape, &dev).unwrap();
-            QTensor::quantize(&t, GgmlDType::F32).unwrap()
+            QTensor::quantize(&t, dtype).unwrap()
         };
-        let rand = |rows: usize, cols: usize| quant(fill(rows * cols, 0.8), &[rows, cols]);
-        let rand1 = |n: usize| quant(fill(n, 0.2), &[n]);
+        let rand = |rows: usize, cols: usize| quant(fill(rows * cols, 0.8), &[rows, cols], dtype);
+        let rand1 = |n: usize| quant(fill(n, 0.2), &[n], GgmlDType::F32);
         let ones = |n: usize| {
             QTensor::quantize(
                 &Tensor::ones(n, candle_core::DType::F32, &dev).unwrap(),
@@ -399,7 +450,7 @@ pub(crate) mod tests {
 
         let kv_dim = KV_HEADS * HEAD_DIM;
         let mut tensors: Vec<(String, QTensor)> = vec![
-            ("token_embd.weight".into(), rand(vocab.len(), EMBED)),
+            ("token_embd.weight".into(), rand(vocab_rows, EMBED)),
             ("output_norm.weight".into(), ones(EMBED)),
         ];
         for i in 0..LAYERS {
@@ -419,7 +470,7 @@ pub(crate) mod tests {
         }
 
         let u32v = |v: usize| Value::U32(v as u32);
-        let meta: Vec<(String, Value)> = vec![
+        let mut meta: Vec<(String, Value)> = vec![
             ("general.architecture".into(), Value::String(arch.into())),
             (format!("{arch}.attention.head_count"), u32v(HEADS)),
             (format!("{arch}.attention.head_count_kv"), u32v(KV_HEADS)),
@@ -431,6 +482,7 @@ pub(crate) mod tests {
                 Value::F32(1e-6),
             ),
         ];
+        meta.extend(extra_meta);
         let meta_refs: Vec<(&str, &Value)> = meta.iter().map(|(k, v)| (k.as_str(), v)).collect();
         let tensor_refs: Vec<(&str, &QTensor)> =
             tensors.iter().map(|(k, v)| (k.as_str(), v)).collect();
@@ -438,7 +490,55 @@ pub(crate) mod tests {
         let mut file = File::create(&gguf_path).unwrap();
         gguf_file::write(&mut file, &meta_refs, &tensor_refs).unwrap();
         file.flush().unwrap();
-        (gguf_path, tokenizer_path)
+        gguf_path
+    }
+
+    /// GPT-2's byte -> printable character table, used by byte-level BPE vocabularies.
+    fn byte_chars() -> Vec<char> {
+        let mut printable: Vec<u32> = (33..=126).chain(161..=172).chain(174..=255).collect();
+        let mut chars = printable.clone();
+        let mut extra = 0;
+        for byte in 0..256u32 {
+            if !printable.contains(&byte) {
+                printable.push(byte);
+                chars.push(256 + extra);
+                extra += 1;
+            }
+        }
+        let mut table = vec!['\0'; 256];
+        for (byte, ch) in printable.into_iter().zip(chars) {
+            table[byte as usize] = char::from_u32(ch).unwrap();
+        }
+        table
+    }
+
+    /// A tiny model whose tokenizer exists only inside the GGUF file (byte-level BPE).
+    pub(crate) fn tiny_embedded_model(dir: &Path) -> std::path::PathBuf {
+        let mut tokens: Vec<String> = byte_chars().iter().map(|c| c.to_string()).collect();
+        tokens.extend(["he", "ll", "hell"].map(String::from));
+        let first_special = tokens.len();
+        tokens.extend(["<|im_start|>", "<|im_end|>", "<|endoftext|>"].map(String::from));
+        let strings = |items: &[String]| {
+            Value::Array(items.iter().map(|t| Value::String(t.clone())).collect())
+        };
+        let types: Vec<Value> = (0..tokens.len())
+            .map(|i| Value::I32(if i >= first_special { 3 } else { 1 }))
+            .collect();
+        let merges: Vec<String> = ["h e", "l l", "he ll"].map(String::from).to_vec();
+        let meta = vec![
+            (
+                "tokenizer.ggml.model".to_owned(),
+                Value::String("gpt2".into()),
+            ),
+            (
+                "tokenizer.ggml.pre".to_owned(),
+                Value::String("qwen2".into()),
+            ),
+            ("tokenizer.ggml.tokens".to_owned(), strings(&tokens)),
+            ("tokenizer.ggml.merges".to_owned(), strings(&merges)),
+            ("tokenizer.ggml.token_type".to_owned(), Value::Array(types)),
+        ];
+        write_tiny_gguf(dir, "qwen2", GgmlDType::F32, tokens.len(), meta)
     }
 
     fn greedy(max_new_tokens: usize, n_ctx: usize) -> EngineConfig {
@@ -470,11 +570,71 @@ pub(crate) mod tests {
         }
 
         fn engine(&self, config: EngineConfig) -> Engine {
-            Engine::load(&self.gguf, &self.tokenizer, config, Arc::default()).unwrap()
+            Engine::load(&self.gguf, Some(&self.tokenizer), config, Arc::default()).unwrap()
         }
     }
 
     static NEVER: AtomicBool = AtomicBool::new(false);
+
+    #[test]
+    fn lean_embedding_model_matches_upstream_candle() {
+        use candle_transformers::models::quantized_qwen2 as upstream;
+
+        for dtype in [GgmlDType::F32, GgmlDType::Q8_0] {
+            let dir = tempfile::tempdir().unwrap();
+            let (gguf, _) = tiny_model_with(dir.path(), "qwen2", dtype);
+            let device = Device::Cpu;
+            let open = || {
+                let mut reader = BufReader::new(File::open(&gguf).unwrap());
+                let content = gguf_file::Content::read(&mut reader).unwrap();
+                (content, reader)
+            };
+            let (content, mut reader) = open();
+            let mut ours =
+                super::quantized_qwen2::ModelWeights::from_gguf(content, &mut reader, &device)
+                    .unwrap();
+            let (content, mut reader) = open();
+            let mut theirs =
+                upstream::ModelWeights::from_gguf(content, &mut reader, &device).unwrap();
+
+            let diff = |a: &Tensor, b: &Tensor| -> f32 {
+                (a - b)
+                    .unwrap()
+                    .abs()
+                    .unwrap()
+                    .max_all()
+                    .unwrap()
+                    .to_scalar::<f32>()
+                    .unwrap()
+            };
+            let prompt = Tensor::new(&[[1u32, 4, 5, 6, 7, 2, 9, 10]], &device).unwrap();
+            let (a, b) = (
+                ours.forward(&prompt, 0).unwrap(),
+                theirs.forward(&prompt, 0).unwrap(),
+            );
+            assert!(
+                diff(&a, &b) < 1e-4,
+                "{dtype:?}: prompt logits differ by {}",
+                diff(&a, &b)
+            );
+            // Then one token at a time, exercising the KV cache.
+            for (pos, id) in [(8usize, 3u32), (9, 11)] {
+                let step = Tensor::new(&[[id]], &device).unwrap();
+                let (a, b) = (
+                    ours.forward(&step, pos).unwrap(),
+                    theirs.forward(&step, pos).unwrap(),
+                );
+                assert!(
+                    diff(&a, &b) < 1e-4,
+                    "{dtype:?}: step {pos} differs by {}",
+                    diff(&a, &b)
+                );
+            }
+            // Out-of-range ids are an error, not a crash.
+            let bad = Tensor::new(&[[9999u32]], &device).unwrap();
+            assert!(ours.forward(&bad, 0).is_err());
+        }
+    }
 
     #[test]
     fn loads_and_generates_deterministically() {
@@ -532,6 +692,47 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_model_without_a_tokenizer_file_uses_the_one_inside_the_gguf() {
+        let dir = tempfile::tempdir().unwrap();
+        let gguf = tiny_embedded_model(dir.path());
+        let mut engine = Engine::load(&gguf, None, greedy(5, 512), Arc::default()).unwrap();
+        let prompt = "<|im_start|>user\nhello hell<|im_end|>\n<|im_start|>assistant\n";
+        let first = engine.generate(prompt, &NEVER).unwrap();
+        assert!(!first.is_empty());
+        // Deterministic and cache-friendly like any other model.
+        let mut again = Engine::load(&gguf, None, greedy(5, 512), Arc::default()).unwrap();
+        assert_eq!(again.generate(prompt, &NEVER).unwrap(), first);
+    }
+
+    #[test]
+    fn the_embedded_tokenizer_splits_text_and_special_tokens_correctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let gguf = tiny_embedded_model(dir.path());
+        let content = gguf_file::Content::read(&mut File::open(&gguf).unwrap()).unwrap();
+        let tokenizer = embedded_tokenizer(&content).unwrap();
+        // "hello" -> hell + o (merges applied); the chat markers are single tokens.
+        let enc = tokenizer
+            .encode("<|im_start|>hello<|im_end|>", false)
+            .unwrap();
+        let pieces: Vec<&str> = enc.get_tokens().iter().map(String::as_str).collect();
+        assert_eq!(pieces, ["<|im_start|>", "hell", "o", "<|im_end|>"]);
+        assert!(tokenizer.token_to_id("<|im_end|>").is_some());
+    }
+
+    #[test]
+    fn a_gguf_without_tokenizer_data_explains_what_to_do() {
+        let dir = tempfile::tempdir().unwrap();
+        let (gguf, _) = tiny_model(dir.path(), "qwen2"); // has weights but no tokenizer metadata
+        let err = Engine::load(&gguf, None, greedy(1, 64), Arc::default())
+            .err()
+            .unwrap();
+        assert!(
+            err.contains("no usable built-in tokenizer") && err.contains("tokenizer.json"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn too_long_prompts_are_rejected_with_advice() {
         let mut engine = Fixture::new().engine(greedy(4, 80));
         let long = "hello ".repeat(100);
@@ -556,7 +757,7 @@ pub(crate) mod tests {
     fn unsupported_architectures_are_named_in_the_error() {
         let dir = tempfile::tempdir().unwrap();
         let (gguf, tok) = tiny_model(dir.path(), "llama");
-        let err = Engine::load(&gguf, &tok, greedy(1, 64), Arc::default())
+        let err = Engine::load(&gguf, Some(&tok), greedy(1, 64), Arc::default())
             .err()
             .unwrap();
         assert!(
@@ -572,7 +773,7 @@ pub(crate) mod tests {
         std::fs::write(dir.path().join("junk.gguf"), b"not a model").unwrap();
         let junk = Engine::load(
             &dir.path().join("junk.gguf"),
-            &tok,
+            Some(&tok),
             greedy(1, 64),
             Arc::default(),
         )
@@ -581,7 +782,7 @@ pub(crate) mod tests {
         assert!(junk.contains("not a valid GGUF"), "{junk}");
         let missing = Engine::load(
             &gguf,
-            &dir.path().join("nope.json"),
+            Some(&dir.path().join("nope.json")),
             greedy(1, 64),
             Arc::default(),
         )

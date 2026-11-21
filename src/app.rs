@@ -11,11 +11,12 @@ use eframe::egui;
 
 use crate::{
     agent::{AgentSession, PollOutcome},
+    filepicker::FilePicker,
     llm::{Anthropic, Http, OpenAiCompat, Provider, UreqHttp},
     local::{
         LocalHost, LocalProvider,
         engine::EngineConfig,
-        models::{self, Download, ModelEntry},
+        models::{self, Download, ExternalModel, ModelEntry},
     },
     project::{Project, ProjectKind, ProjectStore},
     secrets::Secrets,
@@ -53,6 +54,13 @@ impl Tab {
     }
 }
 
+/// The "choose a model file" screen and what the user has picked so far.
+pub struct PickerState {
+    pub picker: FilePicker,
+    pub chosen: Option<PathBuf>,
+    pub name: String,
+}
+
 /// Form fields for downloading any GGUF model by link.
 #[derive(Default)]
 pub struct CustomModel {
@@ -71,6 +79,9 @@ pub struct ZnApp {
     /// Result of the last download attempt, shown in Settings.
     pub(crate) download_note: Option<String>,
     pub(crate) custom_model: CustomModel,
+    pub(crate) picker: Option<PickerState>,
+    /// Show the "allow access to files" explanation.
+    pub(crate) storage_prompt: bool,
     pub(crate) store: ProjectStore,
     pub(crate) tab: Tab,
 
@@ -95,7 +106,11 @@ pub struct ZnApp {
 }
 
 impl ZnApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, data_dir: PathBuf) -> io::Result<Self> {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        data_dir: PathBuf,
+        previous_session: Option<String>,
+    ) -> io::Result<Self> {
         let settings = Settings::load(&data_dir);
         let secrets = Secrets::load(&data_dir);
         apply_settings(&cc.egui_ctx, &settings);
@@ -110,6 +125,8 @@ impl ZnApp {
             download: None,
             download_note: None,
             custom_model: CustomModel::default(),
+            picker: None,
+            storage_prompt: false,
             store,
             tab: Tab::Projects,
             projects,
@@ -128,6 +145,9 @@ impl ZnApp {
             shell_input: String::new(),
         };
         app.refresh_local_models();
+        if let Some(report) = previous_session {
+            app.agent.note(report);
+        }
         Ok(app)
     }
 
@@ -234,11 +254,16 @@ impl ZnApp {
                 }))
             }
             ProviderKind::OnDevice => {
-                let models = models::list_models(&self.data_dir);
-                let model = models
+                let model = models::all_models(&self.data_dir, &s.external_models)
                     .into_iter()
                     .find(|m| m.id == s.local_model)
                     .ok_or("Download or choose an on-device model in Settings first.")?;
+                if !model.gguf.is_file() {
+                    return Err(format!(
+                        "The model file was not found: {}. It may have been moved, or the app lost access to it.",
+                        model.gguf.display()
+                    ));
+                }
                 Ok(Box::new(LocalProvider::new(
                     Arc::clone(&self.local_host),
                     model,
@@ -285,8 +310,54 @@ impl ZnApp {
         }
     }
 
+    /// Opens the file chooser, or explains how to allow file access first.
+    pub(crate) fn open_model_picker(&mut self) {
+        if crate::platform::has_storage_access() {
+            self.storage_prompt = false;
+            self.picker = Some(PickerState {
+                picker: FilePicker::open(&crate::platform::browse_start()),
+                chosen: None,
+                name: String::new(),
+            });
+        } else {
+            self.storage_prompt = true;
+        }
+    }
+
+    /// Remembers a model file the user picked and selects it.
+    pub(crate) fn add_external_model(&mut self, gguf: PathBuf, name: &str) -> Result<(), String> {
+        let name = name.trim().replace(' ', "-");
+        if name.is_empty() {
+            return Err("Give the model a name.".into());
+        }
+        let id = format!("{}{name}", ExternalModel::ID_PREFIX);
+        if self.local_models.iter().any(|m| m.id == id) {
+            return Err("A model with that name already exists.".into());
+        }
+        self.settings.external_models.push(ExternalModel {
+            id: id.clone(),
+            gguf,
+        });
+        self.settings.local_model = id;
+        self.local_host.unload();
+        let _ = self.settings.save(&self.data_dir);
+        self.refresh_local_models();
+        Ok(())
+    }
+
+    /// Forgets a picked model file (the file itself is not touched).
+    pub(crate) fn remove_external_model(&mut self, id: &str) {
+        self.settings.external_models.retain(|m| m.id != id);
+        if self.settings.local_model == id {
+            self.settings.local_model.clear();
+            self.local_host.unload();
+        }
+        let _ = self.settings.save(&self.data_dir);
+        self.refresh_local_models();
+    }
+
     pub(crate) fn refresh_local_models(&mut self) {
-        self.local_models = models::list_models(&self.data_dir);
+        self.local_models = models::all_models(&self.data_dir, &self.settings.external_models);
         if self.settings.local_model.is_empty()
             && let Some(first) = self.local_models.first()
         {
