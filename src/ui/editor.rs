@@ -16,6 +16,17 @@ impl ZnApp {
             if ui.button("Preview").clicked() {
                 self.open_preview();
             }
+            if self.open_file.is_some() {
+                if ui.button("Copy all").clicked() {
+                    super::copy_text(ui.ctx(), &self.buffer);
+                }
+                if ui.button("Paste").clicked()
+                    && let Some(text) = super::pasted_text()
+                {
+                    self.buffer.push_str(&text);
+                    self.dirty = true;
+                }
+            }
         });
         if let Some(note) = &self.preview_note {
             ui.colored_label(ui.visuals().warn_fg_color, note);

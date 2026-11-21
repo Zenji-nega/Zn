@@ -39,6 +39,24 @@ pub fn shortcuts() -> Vec<(&'static str, PathBuf)> {
     places
 }
 
+/// Text copied inside the app, used where the system clipboard is not reachable (desktop
+/// builds already get Ctrl+C / Ctrl+V from the windowing layer).
+#[cfg(not(target_os = "android"))]
+static LOCAL_CLIPBOARD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[cfg(not(target_os = "android"))]
+pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+    if let Ok(mut slot) = LOCAL_CLIPBOARD.lock() {
+        *slot = text.to_owned();
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn clipboard_text() -> Option<String> {
+    LOCAL_CLIPBOARD.lock().ok().map(|s| s.clone())
+}
+
 /// Opens a web address in the system browser.
 #[cfg(not(target_os = "android"))]
 pub fn open_url(url: &str) -> Result<(), String> {
@@ -57,7 +75,10 @@ pub fn open_url(url: &str) -> Result<(), String> {
 }
 
 #[cfg(target_os = "android")]
-pub use android::{has_storage_access, init_android, open_url, request_storage_access};
+pub use android::{
+    clipboard_text, has_storage_access, init_android, open_url, request_storage_access,
+    set_clipboard_text,
+};
 
 #[cfg(not(target_os = "android"))]
 pub fn has_storage_access() -> bool {
@@ -125,6 +146,88 @@ mod android {
             .z()
         })
         .unwrap_or(false)
+    }
+
+    fn clipboard_service<'a>(
+        env: &mut JNIEnv<'a>,
+        activity: &JObject,
+    ) -> jni::errors::Result<JObject<'a>> {
+        let name = env.new_string("clipboard")?;
+        env.call_method(
+            activity,
+            "getSystemService",
+            "(Ljava/lang/String;)Ljava/lang/Object;",
+            &[JValue::Object(&name)],
+        )?
+        .l()
+    }
+
+    /// Puts text on the system clipboard.
+    pub fn set_clipboard_text(text: &str) -> Result<(), String> {
+        with_env(|env, activity| {
+            let service = clipboard_service(env, activity)?;
+            let label = env.new_string("Zn")?;
+            let body = env.new_string(text)?;
+            let clip = env
+                .call_static_method(
+                    "android/content/ClipData",
+                    "newPlainText",
+                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;",
+                    &[JValue::Object(&label), JValue::Object(&body)],
+                )?
+                .l()?;
+            env.call_method(
+                &service,
+                "setPrimaryClip",
+                "(Landroid/content/ClipData;)V",
+                &[JValue::Object(&clip)],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Reads the text on the system clipboard, if there is any.
+    pub fn clipboard_text() -> Option<String> {
+        with_env(|env, activity| {
+            let service = clipboard_service(env, activity)?;
+            let clip = env
+                .call_method(
+                    &service,
+                    "getPrimaryClip",
+                    "()Landroid/content/ClipData;",
+                    &[],
+                )?
+                .l()?;
+            if clip.is_null() || env.call_method(&clip, "getItemCount", "()I", &[])?.i()? < 1 {
+                return Ok(None);
+            }
+            let item = env
+                .call_method(
+                    &clip,
+                    "getItemAt",
+                    "(I)Landroid/content/ClipData$Item;",
+                    &[JValue::Int(0)],
+                )?
+                .l()?;
+            let text = env
+                .call_method(
+                    &item,
+                    "coerceToText",
+                    "(Landroid/content/Context;)Ljava/lang/CharSequence;",
+                    &[JValue::Object(activity)],
+                )?
+                .l()?;
+            if text.is_null() {
+                return Ok(None);
+            }
+            let text: JString = env
+                .call_method(&text, "toString", "()Ljava/lang/String;", &[])?
+                .l()?
+                .into();
+            Ok(Some(String::from(env.get_string(&text)?)))
+        })
+        .ok()
+        .flatten()
     }
 
     /// Opens a web address in the system browser.
@@ -199,5 +302,7 @@ mod tests {
         assert!(!browse_start().as_os_str().is_empty());
         assert!(has_storage_access());
         assert!(request_storage_access().is_ok());
+        set_clipboard_text("hello").unwrap();
+        assert_eq!(clipboard_text().as_deref(), Some("hello"));
     }
 }

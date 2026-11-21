@@ -45,6 +45,11 @@ impl ZnApp {
                 } else if ui.button("Send").clicked() {
                     submit = true;
                 }
+                if ui.button("Paste").clicked()
+                    && let Some(text) = super::pasted_text()
+                {
+                    self.chat_input.push_str(&text);
+                }
                 let input = ui.add_enabled(
                     !self.agent.is_busy(),
                     egui::TextEdit::singleline(&mut self.chat_input)
@@ -81,6 +86,9 @@ impl ZnApp {
                             egui::CollapsingHeader::new(format!("{mark} {summary}"))
                                 .id_salt(summary.as_str().to_owned() + detail)
                                 .show(ui, |ui| {
+                                    if ui.small_button("Copy").clicked() {
+                                        super::copy_text(ui.ctx(), detail);
+                                    }
                                     ui.monospace(detail);
                                 });
                         }
@@ -97,7 +105,12 @@ impl ZnApp {
 fn bubble(ui: &mut egui::Ui, who: &str, text: &str) {
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.strong(who);
+        ui.horizontal(|ui| {
+            ui.strong(who);
+            if ui.small_button("Copy").clicked() {
+                super::copy_text(ui.ctx(), text);
+            }
+        });
         ui.label(text);
     });
 }

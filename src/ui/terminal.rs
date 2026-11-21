@@ -14,6 +14,11 @@ impl ZnApp {
                 if ui.button("Clear").clicked() {
                     self.shell.clear();
                 }
+                if ui.button("Paste").clicked()
+                    && let Some(text) = super::pasted_text()
+                {
+                    self.shell_input.push_str(&text);
+                }
                 let run = ui.add_enabled(!self.shell.is_running(), egui::Button::new("Run"));
                 let input = ui.add(
                     egui::TextEdit::singleline(&mut self.shell_input)

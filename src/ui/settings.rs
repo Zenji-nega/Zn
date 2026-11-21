@@ -115,12 +115,8 @@ impl ZnApp {
 
 /// A full-width text box; returns true when editing finished (focus lost).
 fn text_field(ui: &mut egui::Ui, value: &mut String, secret: bool) -> bool {
-    ui.add(
-        egui::TextEdit::singleline(value)
-            .password(secret)
-            .desired_width(f32::INFINITY),
-    )
-    .lost_focus()
+    let (response, pasted) = super::paste_edit(ui, value, secret);
+    response.lost_focus() || pasted
 }
 
 impl ZnApp {
@@ -239,11 +235,11 @@ impl ZnApp {
         egui::CollapsingHeader::new("Download by link").show(ui, |ui| {
             ui.weak("Any Qwen2 or Qwen3 GGUF model (for example from Hugging Face), plus its tokenizer.json.");
             ui.label("Name");
-            ui.add(egui::TextEdit::singleline(&mut self.custom_model.name).desired_width(f32::INFINITY));
+            super::paste_edit(ui, &mut self.custom_model.name, false);
             ui.label("Model link (.gguf)");
-            ui.add(egui::TextEdit::singleline(&mut self.custom_model.gguf_url).desired_width(f32::INFINITY));
+            super::paste_edit(ui, &mut self.custom_model.gguf_url, false);
             ui.label("Tokenizer link (tokenizer.json)");
-            ui.add(egui::TextEdit::singleline(&mut self.custom_model.tokenizer_url).desired_width(f32::INFINITY));
+            super::paste_edit(ui, &mut self.custom_model.tokenizer_url, false);
             if ui.add_enabled(!busy, egui::Button::new("Download")).clicked() {
                 let c = &self.custom_model;
                 start = Some((c.name.trim().into(), c.gguf_url.trim().into(), c.tokenizer_url.trim().into()));
