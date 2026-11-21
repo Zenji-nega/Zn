@@ -15,7 +15,9 @@ What works today (covered by unit tests, desktop-verified):
 | Terminal | Runs one `sh -c` command at a time in the project directory, streams stdout/stderr |
 | Settings | Dark mode, UI size, GitHub username, AI provider/model/key, and a switch for agent shell commands (off by default) |
 
-Not built yet: streaming replies, GPU/NPU acceleration, Godot 4 export, web preview/publishing, GitHub integration, a bundled Linux environment.
+Website preview: the **Preview** button (Agent and Editor tabs) serves the open project on `127.0.0.1` and opens it in your browser; refresh after the agent edits files. It needs an `index.html`.
+
+Not built yet: an in-app web view (preview opens the system browser), streaming replies, GPU/NPU acceleration, Godot 4 export, web preview/publishing, GitHub integration, a bundled Linux environment.
 
 ## Project layout
 
@@ -29,6 +31,7 @@ src/agent.rs      agent loop + threaded AgentSession
 src/llm.rs        Anthropic / OpenAI-compatible adapters (pure request/response code)
 src/tools.rs      the tools the agent can call, scoped to the open project
 src/local/        on-device models: prompt format (prompt.rs), candle GGUF engine (engine.rs), downloads (models.rs)
+src/preview.rs    local web server behind the Preview button
 src/diag.rs       crash breadcrumbs and reports
 src/filepicker.rs folder browser logic for choosing model files
 src/platform.rs   Android storage permission (JNI)

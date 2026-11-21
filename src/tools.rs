@@ -127,7 +127,13 @@ impl Toolbox {
             "write_file" => self.write_file(input),
             "run_command" if self.allow_commands => self.run_command(input),
             "run_command" => Err("running commands is disabled in Settings".into()),
-            other => Err(format!("unknown tool \"{other}\"")),
+            other => {
+                let available: Vec<&str> = self.specs().iter().map(|t| t.name).collect();
+                Err(format!(
+                    "unknown tool \"{other}\". Available tools: {}",
+                    available.join(", ")
+                ))
+            }
         }
     }
 

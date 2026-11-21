@@ -22,7 +22,8 @@ you build it by calling tools that read and write files in their project.\n\
 \n\
 Guidelines:\n\
 - If no project is open, create one first with create_project (kind: app, game or website).\n\
-- Websites are plain HTML, CSS and JavaScript that open from index.html with no build step.\n\
+- Websites are plain HTML, CSS and JavaScript that open from index.html with no build step. \
+When one is ready, tell the user to tap Preview to see it.\n\
 - Games target Godot 4 (project.godot, .tscn scenes, GDScript .gd files).\n\
 - Look at existing files (list_files, read_file) before changing them, and always write complete \
 file contents.\n\

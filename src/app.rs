@@ -103,9 +103,44 @@ pub struct ZnApp {
 
     pub(crate) shell: ShellSession,
     pub(crate) shell_input: String,
+
+    /// Local web server for previewing websites; started on first use.
+    pub(crate) preview: Option<crate::preview::PreviewServer>,
+    /// Result of the last "Preview" tap.
+    pub(crate) preview_note: Option<String>,
 }
 
 impl ZnApp {
+    /// Serves the open project on localhost and opens it in the system browser.
+    pub(crate) fn open_preview(&mut self) {
+        let Some(project) = self.current.clone() else {
+            self.preview_note = Some("Open a project first.".into());
+            return;
+        };
+        if !project.path.join("index.html").is_file() {
+            self.preview_note = Some(
+                "This project has no index.html yet. Ask the agent to build a website first."
+                    .into(),
+            );
+            return;
+        }
+        let url = match &self.preview {
+            Some(server) => {
+                server.set_root(project.path.clone());
+                Ok(server.url())
+            }
+            None => crate::preview::PreviewServer::start(project.path.clone()).map(|server| {
+                let url = server.url();
+                self.preview = Some(server);
+                url
+            }),
+        };
+        self.preview_note = match url {
+            Ok(url) => crate::platform::open_url(&url).err(),
+            Err(err) => Some(format!("could not start the preview server: {err}")),
+        };
+    }
+
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         data_dir: PathBuf,
@@ -142,6 +177,8 @@ impl ZnApp {
             agent: AgentSession::new(),
             chat_input: String::new(),
             shell: ShellSession::default(),
+            preview: None,
+            preview_note: None,
             shell_input: String::new(),
         };
         app.refresh_local_models();

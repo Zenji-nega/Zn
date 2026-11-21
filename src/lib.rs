@@ -11,6 +11,7 @@ pub mod filepicker;
 pub mod llm;
 pub mod local;
 pub mod platform;
+pub mod preview;
 pub mod project;
 pub mod secrets;
 pub mod settings;
