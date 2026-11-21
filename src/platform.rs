@@ -39,8 +39,25 @@ pub fn shortcuts() -> Vec<(&'static str, PathBuf)> {
     places
 }
 
+/// Opens a web address in the system browser.
+#[cfg(not(target_os = "android"))]
+pub fn open_url(url: &str) -> Result<(), String> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(program)
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open the browser: {e}"))
+}
+
 #[cfg(target_os = "android")]
-pub use android::{has_storage_access, init_android, request_storage_access};
+pub use android::{has_storage_access, init_android, open_url, request_storage_access};
 
 #[cfg(not(target_os = "android"))]
 pub fn has_storage_access() -> bool {
@@ -108,6 +125,34 @@ mod android {
             .z()
         })
         .unwrap_or(false)
+    }
+
+    /// Opens a web address in the system browser.
+    pub fn open_url(url: &str) -> Result<(), String> {
+        with_env(|env, activity| {
+            let text = env.new_string(url)?;
+            let uri = env
+                .call_static_method(
+                    "android/net/Uri",
+                    "parse",
+                    "(Ljava/lang/String;)Landroid/net/Uri;",
+                    &[JValue::Object(&text)],
+                )?
+                .l()?;
+            let action = env.new_string("android.intent.action.VIEW")?;
+            let intent = env.new_object(
+                "android/content/Intent",
+                "(Ljava/lang/String;Landroid/net/Uri;)V",
+                &[JValue::Object(&action), JValue::Object(&uri)],
+            )?;
+            env.call_method(
+                activity,
+                "startActivity",
+                "(Landroid/content/Intent;)V",
+                &[JValue::Object(&intent)],
+            )?;
+            Ok(())
+        })
     }
 
     /// Opens the system page where the user can allow "All files access" for this app.

@@ -11,7 +11,15 @@ impl ZnApp {
             ui.weak("Open a project from the Projects tab first.");
             return;
         };
-        ui.heading(&project.name);
+        ui.horizontal(|ui| {
+            ui.heading(&project.name);
+            if ui.button("Preview").clicked() {
+                self.open_preview();
+            }
+        });
+        if let Some(note) = &self.preview_note {
+            ui.colored_label(ui.visuals().warn_fg_color, note);
+        }
 
         let mut to_open: Option<PathBuf> = None;
         let selected_text = self

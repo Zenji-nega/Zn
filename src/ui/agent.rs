@@ -12,7 +12,17 @@ impl ZnApp {
             {
                 self.agent.clear();
             }
+            if ui
+                .add_enabled(self.current.is_some(), egui::Button::new("Preview"))
+                .on_hover_text("Open the project's website in your browser")
+                .clicked()
+            {
+                self.open_preview();
+            }
         });
+        if let Some(note) = &self.preview_note {
+            ui.colored_label(ui.visuals().warn_fg_color, note);
+        }
         let project = self.current.as_ref().map_or("none", |p| p.name.as_str());
         let model = match self.settings.provider {
             crate::settings::ProviderKind::Anthropic => &self.settings.anthropic_model,
@@ -67,7 +77,7 @@ impl ZnApp {
                             ui.colored_label(ui.visuals().warn_fg_color, text);
                         }
                         ChatEntry::Tool { summary, ok, detail } => {
-                            let mark = if *ok { "✔" } else { "✘" };
+                            let mark = if *ok { "[ok]" } else { "[failed]" };
                             egui::CollapsingHeader::new(format!("{mark} {summary}"))
                                 .id_salt(summary.as_str().to_owned() + detail)
                                 .show(ui, |ui| {
