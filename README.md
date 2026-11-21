@@ -79,6 +79,8 @@ Pick **On-device (offline)** in Settings, download a model, and the agent runs i
 
 ## Known limitations
 
+- `vendor/candle-core` is candle-core 0.11.1 with one patch: upstream's quantized ARM kernels use the SDOT instruction unconditionally and crash (SIGILL) on phones older than ARMv8.2 such as the Galaxy M31; the patch falls back to plain NEON there. Remove it once upstream fixes this.
+
 - egui does not shape Arabic or lay out right-to-left text, so the UI is English for now. Arabic characters render through system fonts but joined letters will look disconnected.
 - `accesskit` (screen reader support) is disabled on Android because eframe cannot combine it with `native-activity`.
 - The terminal uses the Android system shell; there is no bundled Linux userland yet.

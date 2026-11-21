@@ -81,3 +81,8 @@ name = "android.permission.MANAGE_EXTERNAL_STORAGE"
 [profile.dev]
 opt-level = 3
 debug = false
+
+# candle-core 0.11.1 with a fallback for CPUs without the SDOT instruction (see
+# vendor/candle-core/src/quantized/neon.rs). Upstream crashes with SIGILL on such phones.
+[patch.crates-io]
+candle-core = { path = "vendor/candle-core" }
