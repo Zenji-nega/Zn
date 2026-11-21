@@ -335,6 +335,20 @@ impl ModelWeights {
         }
     }
 
+    /// Keeps only the first `len` cached positions (a no-op when fewer are cached).
+    pub fn truncate_kv(&mut self, len: usize) -> Result<()> {
+        for layer in self.layers.iter_mut() {
+            if let Some((k, v)) = &layer.kv_cache
+                && k.dim(2)? > len
+            {
+                let k = k.narrow(2, 0, len)?.contiguous()?;
+                let v = v.narrow(2, 0, len)?.contiguous()?;
+                layer.kv_cache = Some((k, v));
+            }
+        }
+        Ok(())
+    }
+
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
         let (_b_sz, seq_len) = x.dims2()?;
         let mask = if seq_len == 1 {

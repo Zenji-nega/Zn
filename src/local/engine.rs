@@ -26,7 +26,7 @@ use tokenizers::Tokenizer;
 use super::prompt::Template;
 
 /// Prompt tokens processed per forward pass; bounds peak memory and keeps Stop responsive.
-const PREFILL_CHUNK: usize = 256;
+const PREFILL_CHUNK: usize = 64;
 const CANCELLED: &str = "cancelled";
 
 #[derive(Clone, Debug)]
@@ -59,6 +59,8 @@ pub struct Progress {
     pub phase: AtomicUsize,
     pub done: AtomicUsize,
     pub total: AtomicUsize,
+    /// When the current phase started (for speed and elapsed time).
+    started: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Progress {
@@ -68,6 +70,11 @@ impl Progress {
     pub const WRITING: usize = 3;
 
     fn set(&self, phase: usize, done: usize, total: usize) {
+        if self.phase.load(Ordering::Relaxed) != phase
+            && let Ok(mut started) = self.started.lock()
+        {
+            *started = Some(std::time::Instant::now());
+        }
         self.phase.store(phase, Ordering::Relaxed);
         self.done.store(done, Ordering::Relaxed);
         self.total.store(total, Ordering::Relaxed);
@@ -77,10 +84,29 @@ impl Progress {
     pub fn describe(&self) -> Option<String> {
         let done = self.done.load(Ordering::Relaxed);
         let total = self.total.load(Ordering::Relaxed);
+        let secs = self
+            .started
+            .lock()
+            .ok()
+            .and_then(|s| s.map(|t| t.elapsed().as_secs_f32()))
+            .unwrap_or(0.0);
+        let speed = |n: usize| {
+            if secs >= 1.0 && n > 0 {
+                format!(", {:.1} tokens/s", n as f32 / secs)
+            } else {
+                String::new()
+            }
+        };
         match self.phase.load(Ordering::Relaxed) {
-            Self::LOADING => Some("Loading the model…".to_owned()),
-            Self::READING => Some(format!("Reading the conversation… {done}/{total}")),
-            Self::WRITING => Some(format!("Writing… {done} tokens")),
+            Self::LOADING => Some(format!("Loading the model… {secs:.0}s")),
+            Self::READING => Some(format!(
+                "Reading the conversation… {done}/{total} ({secs:.0}s{})",
+                speed(done)
+            )),
+            Self::WRITING => Some(format!(
+                "Writing… {done} tokens ({secs:.0}s{})",
+                speed(done)
+            )),
             _ => None,
         }
     }
@@ -115,6 +141,14 @@ impl Weights {
         match self {
             Self::Qwen2(m) => m.forward(input, pos),
             Self::Qwen3(m) => m.forward(input, pos),
+        }
+    }
+
+    /// Drops cached positions past `len`. Returns false when the model cannot do it.
+    fn truncate(&mut self, len: usize) -> bool {
+        match self {
+            Self::Qwen2(m) => m.truncate_kv(len).is_ok(),
+            Self::Qwen3(_) => false,
         }
     }
 
@@ -268,12 +302,20 @@ impl Engine {
             ));
         }
 
-        // Reuse the cache only when the new prompt extends exactly what is cached.
-        let reuse = !self.cached.is_empty()
-            && tokens.len() > self.cached.len()
-            && tokens[..self.cached.len()] == self.cached[..];
-        let start = if reuse {
-            self.cached.len()
+        // Reuse the longest common prefix with what is cached (at least one new token
+        // must be processed so there are logits to sample from).
+        let common = self
+            .cached
+            .iter()
+            .zip(&tokens)
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(tokens.len() - 1);
+        let start = if common > 0 && common == self.cached.len() {
+            common
+        } else if common > 0 && self.weights.truncate(common) {
+            self.cached.truncate(common);
+            common
         } else {
             self.weights.clear();
             self.cached.clear();
@@ -674,7 +716,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_unrelated_prompt_resets_the_cache() {
+    fn a_prompt_that_diverges_reuses_only_the_common_prefix() {
         let fx = Fixture::new();
         let mut warm = fx.engine(greedy(4, 512));
         warm.generate(
@@ -684,7 +726,8 @@ pub(crate) mod tests {
         .unwrap();
         let other = "<|im_start|>user\nworld yes<|im_end|>\n<|im_start|>assistant\n";
         let warm_out = warm.generate(other, &NEVER).unwrap();
-        assert_eq!(warm.last_reused(), 0);
+        assert!(warm.last_reused() > 0, "the shared prefix should be reused");
+        assert!(warm.last_reused() < warm.cached_tokens());
         assert_eq!(
             warm_out,
             fx.engine(greedy(4, 512)).generate(other, &NEVER).unwrap()
@@ -798,9 +841,9 @@ pub(crate) mod tests {
         progress.set(Progress::READING, 10, 40);
         assert_eq!(
             progress.describe().unwrap(),
-            "Reading the conversation… 10/40"
+            "Reading the conversation… 10/40 (0s)"
         );
         progress.set(Progress::WRITING, 7, 0);
-        assert_eq!(progress.describe().unwrap(), "Writing… 7 tokens");
+        assert_eq!(progress.describe().unwrap(), "Writing… 7 tokens (0s)");
     }
 }
