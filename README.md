@@ -29,6 +29,9 @@ src/agent.rs      agent loop + threaded AgentSession
 src/llm.rs        Anthropic / OpenAI-compatible adapters (pure request/response code)
 src/tools.rs      the tools the agent can call, scoped to the open project
 src/local/        on-device models: prompt format (prompt.rs), candle GGUF engine (engine.rs), downloads (models.rs)
+src/diag.rs       crash breadcrumbs and reports
+src/filepicker.rs folder browser logic for choosing model files
+src/platform.rs   Android storage permission (JNI)
 src/secrets.rs    API keys (separate file, owner-only permissions)
 src/shell.rs      in-app terminal
 src/settings.rs   persisted settings
@@ -67,7 +70,9 @@ Or run the **Android APK** workflow from the repository's Actions tab and downlo
 Pick **On-device (offline)** in Settings, download a model, and the agent runs it on the phone's CPU with [candle](https://github.com/huggingface/candle), pure Rust and no internet needed afterwards.
 
 - Supported: quantized **GGUF** models of the `qwen2` (Qwen2.5, Qwen2.5-Coder) and `qwen3` architectures. Three Qwen2.5-Coder presets are built in; "Download by link" accepts any other compatible GGUF plus its `tokenizer.json`.
-- Downloads resume if interrupted. Models live in the app's private `models/` folder.
+- Downloads resume if interrupted. Downloaded models live in the app's private `models/` folder.
+- **Models already on your phone:** Settings → On-device → "Choose a model file…" browses your storage for `.gguf` files. The file is used in place (not copied). If a `tokenizer.json` sits next to it, that is used; otherwise the tokenizer stored inside the GGUF is. On Android 11 or newer you must allow **All files access** for the app once (the button opens the right system page); older Android versions are not supported for this.
+- If the app closes unexpectedly, it tells you at the next start what it was doing and how much memory was free (and the crash signal, if there was one). Send that text when reporting a problem.
 - Expect it to be **slow**: a 1.5B model on a recent phone reads the prompt at tens of tokens per second and writes a few per second. The attention cache is kept between steps, so only new text is reprocessed. Models of 0.5B to 3B are also much less reliable at tool use than cloud models, so keep requests small and concrete.
 - The conversation is limited to 8192 tokens; start a new chat when you hit it.
 - "Free memory" unloads the model.
@@ -79,5 +84,5 @@ Pick **On-device (offline)** in Settings, download a model, and the agent runs i
 - The terminal uses the Android system shell; there is no bundled Linux userland yet.
 - API keys are saved unencrypted in the app's private folder (`secrets.json`, owner-only). Android Keystore support would be a later upgrade. GitHub tokens are not stored at all yet.
 - With "Let the agent run shell commands" on, the agent runs commands without asking each time. Leave it off unless you want that. On a desktop build the commands run with your user's permissions.
-- The on-device engine was verified with a tiny synthetic model in unit tests, not yet with real Qwen weights on a phone.
+- The on-device engine was verified with tiny synthetic models in unit tests (including a check that its memory-lean Qwen2 code matches upstream candle), not yet with real Qwen weights on a phone. The Android file-access code (JNI) is only compiled by CI, not unit-tested.
 - The model sees the whole conversation on every request; there is no history trimming yet, so very long chats will get slow and costly.

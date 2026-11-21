@@ -16,8 +16,10 @@ path = "src/main.rs"
 
 [dependencies]
 candle-core = "0.11"
+candle-nn = "0.11"
 candle-transformers = "0.11"
 log = "0.4"
+rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
@@ -45,6 +47,10 @@ eframe = { version = "0.37", default-features = false, features = [
 ] }
 android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
+jni = "0.21"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
@@ -64,6 +70,11 @@ label = "Zn"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
+
+# Lets the app read model files the user keeps in shared storage (granted on a system
+# settings page; see platform.rs).
+[[package.metadata.android.uses_permission]]
+name = "android.permission.MANAGE_EXTERNAL_STORAGE"
 
 # On-device inference is unusably slow without optimizations, and `cargo apk build`
 # uses the dev profile, so optimize it. Debug info is dropped to keep the APK small.

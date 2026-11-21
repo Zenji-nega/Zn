@@ -6,7 +6,10 @@ use std::{fs, io, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::llm::{Anthropic, OpenAiCompat};
+use crate::{
+    llm::{Anthropic, OpenAiCompat},
+    local::models::ExternalModel,
+};
 
 const FILE_NAME: &str = "settings.json";
 
@@ -44,6 +47,10 @@ pub struct Settings {
     pub openai_model: String,
     /// Folder name of the chosen on-device model.
     pub local_model: String,
+    /// Model files picked from the device's storage.
+    pub external_models: Vec<ExternalModel>,
+    /// CPU threads for on-device models; 0 picks automatically. Applies after a restart.
+    pub local_threads: usize,
     /// Lets the agent run shell commands in the project. Off by default.
     pub allow_commands: bool,
 }
@@ -80,6 +87,8 @@ impl Default for Settings {
             openai_base_url: OpenAiCompat::DEFAULT_BASE_URL.to_owned(),
             openai_model: String::new(),
             local_model: String::new(),
+            external_models: Vec::new(),
+            local_threads: 0,
             allow_commands: false,
         }
     }
